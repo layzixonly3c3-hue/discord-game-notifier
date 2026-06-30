@@ -46,57 +46,74 @@ async function fetchPlayerName(tag) {
   }
 }
 
-function formatBattleMessage(playerName, tag, item) {
+// Couleurs Discord (décimal) selon le résultat
+const RESULT_COLORS = {
+  victory: 0xf1c40f, // doré
+  defeat: 0xe74c3c,  // rouge
+  draw: 0x95a5a6     // gris
+};
+
+function formatPlayerLine(p) {
+  if (!p) return '• Inconnu';
+  const brawler = p.brawler?.name || '?';
+  const trophies = typeof p.brawler?.trophies === 'number' ? p.brawler.trophies : '?';
+  return `• ${p.name} (${p.tag} | ${brawler} | ${trophies})`;
+}
+
+function buildBattleEmbed(playerName, tag, item) {
   const b = item.battle || {};
   const mode = b.mode || item.event?.mode || 'mode inconnu';
   const map = item.event?.map || 'carte inconnue';
+  const myTag = `#${tag}`;
 
-  let resultEmoji = '➖';
   let resultText = 'Match terminé';
-  if (b.result === 'victory') {
-    resultEmoji = '🏆';
-    resultText = 'Victoire';
-  } else if (b.result === 'defeat') {
-    resultEmoji = '💀';
-    resultText = 'Défaite';
-  } else if (b.result === 'draw') {
-    resultEmoji = '🤝';
-    resultText = 'Égalité';
-  }
+  if (b.result === 'victory') resultText = 'Victoire';
+  else if (b.result === 'defeat') resultText = 'Défaite';
+  else if (b.result === 'draw') resultText = 'Égalité';
 
-  let trophyText = '';
-  if (typeof b.trophyChange === 'number') {
-    trophyText = ` | Trophées : ${b.trophyChange > 0 ? '+' : ''}${b.trophyChange}`;
-  }
-
-  // Cherche le brawler utilisé par ce joueur dans les équipes / la liste de joueurs
-  let brawlerText = '';
-  const findInList = (list) =>
-    list?.find((p) => p.tag === `#${tag}`);
+  // Sépare les équipes (mode 3v3) en "Team" (celle du joueur suivi) et "Enemies"
+  let teamLines = [];
+  let enemyLines = [];
 
   if (Array.isArray(b.teams)) {
     for (const team of b.teams) {
-      const me = findInList(team);
-      if (me?.brawler?.name) {
-        brawlerText = ` avec **${me.brawler.name}**`;
-        break;
-      }
+      const isMyTeam = team.some((p) => p.tag === myTag);
+      const lines = team.map(formatPlayerLine);
+      if (isMyTeam) teamLines.push(...lines);
+      else enemyLines.push(...lines);
     }
   } else if (Array.isArray(b.players)) {
-    const me = findInList(b.players);
-    if (me?.brawler?.name) {
-      brawlerText = ` avec **${me.brawler.name}**`;
-    }
+    // Modes sans équipes (ex: Solo Showdown) : tout le monde dans une seule liste
+    teamLines = b.players.map(formatPlayerLine);
   }
 
-  return `🎮 **${playerName}** vient de terminer une partie de *${mode}* sur *${map}*${brawlerText}\n${resultEmoji} ${resultText}${trophyText}`;
+  const fields = [
+    { name: '🗺️ Map', value: map, inline: false },
+    { name: '🔍 Target Player', value: `${playerName} (${myTag})`, inline: false },
+    { name: '🏆 Result', value: resultText, inline: false },
+    { name: '🎯 Mode', value: mode, inline: false }
+  ];
+
+  if (teamLines.length > 0) {
+    fields.push({ name: '👥 Team', value: teamLines.join('\n'), inline: false });
+  }
+  if (enemyLines.length > 0) {
+    fields.push({ name: '⚔️ Enemies', value: enemyLines.join('\n'), inline: false });
+  }
+
+  return {
+    title: '⚔️ Brawl Stars Match',
+    color: RESULT_COLORS[b.result] ?? 0x5865f2,
+    fields,
+    timestamp: new Date().toISOString()
+  };
 }
 
-async function sendDiscordMessage(content) {
+async function sendDiscordEmbed(embed) {
   const res = await fetch(DISCORD_WEBHOOK_URL, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ content })
+    body: JSON.stringify({ embeds: [embed] })
   });
   if (!res.ok) {
     const text = await res.text();
@@ -126,7 +143,7 @@ async function checkPlayer(tag) {
   const playerName = await fetchPlayerName(tag);
 
   for (const battle of newBattles) {
-    await sendDiscordMessage(formatBattleMessage(playerName, tag, battle));
+    await sendDiscordEmbed(buildBattleEmbed(playerName, tag, battle));
   }
 
   lastSeenBattleTime.set(tag, mostRecentTime);
