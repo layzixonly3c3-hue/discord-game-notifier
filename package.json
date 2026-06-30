@@ -1,17 +1,17 @@
 {
   "name": "discord-game-notifier",
   "version": "1.0.0",
-  "description": "Serveur qui relaie les fins de partie d'un jeu vers un salon Discord via webhook",
   "type": "module",
   "main": "index.js",
-  "scripts": {
-    "start": "node index.js"
-  },
   "engines": {
     "node": ">=18"
   },
+  "scripts": {
+    "start": "node index.js"
+  },
   "dependencies": {
-    "express": "^4.19.2",
-    "dotenv": "^16.4.5"
+    "discord-interactions": "^3.4.0",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2"
   }
 }
