@@ -1,25 +1,23 @@
 import express from 'express';
 import 'dotenv/config';
+import { verifyKeyMiddleware, InteractionType, InteractionResponseType } from 'discord-interactions';
 
 const app = express();
-app.use(express.json());
 
 const DISCORD_WEBHOOK_URL = process.env.DISCORD_WEBHOOK_URL;
 const BRAWL_STARS_API_KEY = process.env.BRAWL_STARS_API_KEY;
+const DISCORD_PUBLIC_KEY = process.env.DISCORD_PUBLIC_KEY;
+const DISCORD_APPLICATION_ID = process.env.DISCORD_APPLICATION_ID;
+const RENDER_API_KEY = process.env.RENDER_API_KEY;
+const RENDER_SERVICE_ID = process.env.RENDER_SERVICE_ID;
 
 // PLAYER_TAGS : liste de tags séparés par des virgules dans les variables d'environnement
-// Exemple : "QPY88C2PR,8YYUUQR8R"  (avec ou sans #, peu importe)
 const PLAYER_TAGS = (process.env.PLAYER_TAGS || '')
   .split(',')
   .map((t) => t.trim().replace(/^#/, '').toUpperCase())
   .filter(Boolean);
 
-// On passe par le proxy RoyaleAPI car l'API officielle Brawl Stars exige une IP fixe
-// whitelistée, ce que les hébergeurs gratuits (Render, etc.) ne fournissent pas.
 const BS_API_BASE = 'https://bsproxy.royaleapi.dev/v1';
-
-// Mémorise le timestamp de la dernière partie connue pour chaque joueur.
-// ⚠️ Stocké en mémoire : remis à zéro si le serveur redémarre (acceptable pour un usage perso).
 const lastSeenBattleTime = new Map();
 
 async function bsFetch(path) {
@@ -46,11 +44,15 @@ async function fetchPlayerName(tag) {
   }
 }
 
-// Couleurs Discord (décimal) selon le résultat
+// Vérifie que le tag existe vraiment côté Brawl Stars avant de l'ajouter
+async function validateTagExists(tag) {
+  await bsFetch(`/players/%23${tag}`);
+}
+
 const RESULT_COLORS = {
-  victory: 0xf1c40f, // doré
-  defeat: 0xe74c3c,  // rouge
-  draw: 0x95a5a6     // gris
+  victory: 0xf1c40f,
+  defeat: 0xe74c3c,
+  draw: 0x95a5a6
 };
 
 function formatPlayerLine(p) {
@@ -71,7 +73,6 @@ function buildBattleEmbed(playerName, tag, item) {
   else if (b.result === 'defeat') resultText = 'Défaite';
   else if (b.result === 'draw') resultText = 'Égalité';
 
-  // Sépare les équipes (mode 3v3) en "Team" (celle du joueur suivi) et "Enemies"
   let teamLines = [];
   let enemyLines = [];
 
@@ -83,7 +84,6 @@ function buildBattleEmbed(playerName, tag, item) {
       else enemyLines.push(...lines);
     }
   } else if (Array.isArray(b.players)) {
-    // Modes sans équipes (ex: Solo Showdown) : tout le monde dans une seule liste
     teamLines = b.players.map(formatPlayerLine);
   }
 
@@ -94,12 +94,8 @@ function buildBattleEmbed(playerName, tag, item) {
     { name: '🎯 Mode', value: mode, inline: false }
   ];
 
-  if (teamLines.length > 0) {
-    fields.push({ name: '👥 Team', value: teamLines.join('\n'), inline: false });
-  }
-  if (enemyLines.length > 0) {
-    fields.push({ name: '⚔️ Enemies', value: enemyLines.join('\n'), inline: false });
-  }
+  if (teamLines.length > 0) fields.push({ name: '👥 Team', value: teamLines.join('\n'), inline: false });
+  if (enemyLines.length > 0) fields.push({ name: '⚔️ Enemies', value: enemyLines.join('\n'), inline: false });
 
   return {
     title: '⚔️ Brawl Stars Match',
@@ -126,17 +122,14 @@ async function checkPlayer(tag) {
   const items = log.items || [];
   if (items.length === 0) return;
 
-  // Le combat le plus récent est en premier dans la réponse de l'API
   const mostRecentTime = items[0].battleTime;
   const lastSeen = lastSeenBattleTime.get(tag);
 
   if (lastSeen === undefined) {
-    // Premier check pour ce joueur : on mémorise sans notifier (évite le spam au démarrage)
     lastSeenBattleTime.set(tag, mostRecentTime);
     return;
   }
 
-  // Nouvelles parties depuis le dernier check, remises dans l'ordre chronologique
   const newBattles = items.filter((item) => item.battleTime > lastSeen).reverse();
   if (newBattles.length === 0) return;
 
@@ -149,15 +142,115 @@ async function checkPlayer(tag) {
   lastSeenBattleTime.set(tag, mostRecentTime);
 }
 
+// ---------- Intégration commande Discord /ajouter-joueur ----------
+
+async function getRenderEnvVars() {
+  const res = await fetch(`https://api.render.com/v1/services/${RENDER_SERVICE_ID}/env-vars`, {
+    headers: { Authorization: `Bearer ${RENDER_API_KEY}` }
+  });
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`Render API ${res.status} (lecture) : ${text}`);
+  }
+  return res.json();
+}
+
+async function setRenderEnvVars(envVarsArray) {
+  const res = await fetch(`https://api.render.com/v1/services/${RENDER_SERVICE_ID}/env-vars`, {
+    method: 'PUT',
+    headers: {
+      Authorization: `Bearer ${RENDER_API_KEY}`,
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify(envVarsArray)
+  });
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`Render API ${res.status} (écriture) : ${text}`);
+  }
+}
+
+async function addPlayerTagToRender(newTag) {
+  const current = await getRenderEnvVars();
+  const currentMap = {};
+  for (const item of current) {
+    currentMap[item.envVar.key] = item.envVar.value;
+  }
+
+  const existingTags = (currentMap.PLAYER_TAGS || '')
+    .split(',')
+    .map((t) => t.trim().toUpperCase())
+    .filter(Boolean);
+
+  if (existingTags.includes(newTag)) {
+    throw new Error('Ce joueur est déjà suivi.');
+  }
+
+  existingTags.push(newTag);
+  currentMap.PLAYER_TAGS = existingTags.join(',');
+
+  const payload = Object.entries(currentMap).map(([key, value]) => ({ key, value }));
+  await setRenderEnvVars(payload);
+}
+
+async function editOriginalInteractionResponse(interactionToken, content) {
+  const url = `https://discord.com/api/v10/webhooks/${DISCORD_APPLICATION_ID}/${interactionToken}/messages/@original`;
+  await fetch(url, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ content })
+  });
+}
+
+app.post('/interactions', verifyKeyMiddleware(DISCORD_PUBLIC_KEY), async (req, res) => {
+  const interaction = req.body;
+
+  if (interaction.type === InteractionType.PING) {
+    return res.send({ type: InteractionResponseType.PONG });
+  }
+
+  if (interaction.type === InteractionType.APPLICATION_COMMAND) {
+    const { name, options } = interaction.data;
+
+    if (name === 'ajouter-joueur') {
+      const tagOption = options?.find((o) => o.name === 'tag');
+      const rawTag = (tagOption?.value || '').trim().replace(/^#/, '').toUpperCase();
+
+      res.send({ type: InteractionResponseType.DEFERRED_CHANNEL_MESSAGE_WITH_SOURCE });
+
+      try {
+        if (!rawTag) throw new Error('Tag vide ou invalide.');
+        await validateTagExists(rawTag);
+        await addPlayerTagToRender(rawTag);
+        await editOriginalInteractionResponse(
+          interaction.token,
+          `✅ Joueur **${rawTag}** ajouté au suivi ! Le bot redémarre (~1 min) pour prendre en compte le changement.`
+        );
+      } catch (err) {
+        console.error('Erreur ajout joueur :', err.message);
+        await editOriginalInteractionResponse(interaction.token, `❌ Erreur : ${err.message}`);
+      }
+      return;
+    }
+
+    return res.send({
+      type: InteractionResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
+      data: { content: '❓ Commande inconnue.' }
+    });
+  }
+
+  return res.status(400).json({ error: "Type d'interaction non géré." });
+});
+
+app.use(express.json());
+
 app.get('/', (req, res) => {
   res.send('✅ Bot de notification Brawl Stars en ligne.');
 });
 
-// Cette route doit être appelée régulièrement par un service externe
-// (ex: cron-job.org) pour déclencher la vérification des nouvelles parties.
 app.get('/check', async (req, res) => {
   if (PLAYER_TAGS.length === 0) {
-    return res.status(400).json({ error: "Aucun tag configuré dans la variable PLAYER_TAGS." });
+    return res.status(400).json({ error: 'Aucun tag configuré dans la variable PLAYER_TAGS.' });
   }
   if (!BRAWL_STARS_API_KEY) {
     return res.status(500).json({ error: "BRAWL_STARS_API_KEY n'est pas définie." });
