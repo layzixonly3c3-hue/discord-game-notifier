@@ -142,7 +142,7 @@ async function checkPlayer(tag) {
   lastSeenBattleTime.set(tag, mostRecentTime);
 }
 
-// ---------- Intégration commande Discord /ajouter-joueur ----------
+// ---------- Intégration commandes Discord ----------
 
 async function getRenderEnvVars() {
   const res = await fetch(`https://api.render.com/v1/services/${RENDER_SERVICE_ID}/env-vars`, {
@@ -185,30 +185,50 @@ async function triggerRenderDeploy() {
   }
 }
 
-async function addPlayerTagToRender(newTag) {
+async function getCurrentPlayerTags() {
   const current = await getRenderEnvVars();
   const currentMap = {};
   for (const item of current) {
     currentMap[item.envVar.key] = item.envVar.value;
   }
-
-  const existingTags = (currentMap.PLAYER_TAGS || '')
+  const tags = (currentMap.PLAYER_TAGS || '')
     .split(',')
     .map((t) => t.trim().toUpperCase())
     .filter(Boolean);
+  return { currentMap, tags };
+}
 
-  if (existingTags.includes(newTag)) {
+async function addPlayerTagToRender(newTag) {
+  const { currentMap, tags } = await getCurrentPlayerTags();
+
+  if (tags.includes(newTag)) {
     throw new Error('Ce joueur est déjà suivi.');
   }
 
-  existingTags.push(newTag);
-  currentMap.PLAYER_TAGS = existingTags.join(',');
+  tags.push(newTag);
+  currentMap.PLAYER_TAGS = tags.join(',');
 
   const payload = Object.entries(currentMap).map(([key, value]) => ({ key, value }));
   await setRenderEnvVars(payload);
 
   // Déclenche explicitement un nouveau déploiement pour que le serveur
   // recharge bien la nouvelle valeur de PLAYER_TAGS en mémoire.
+  await triggerRenderDeploy();
+}
+
+async function removePlayerTagFromRender(tagToRemove) {
+  const { currentMap, tags } = await getCurrentPlayerTags();
+
+  if (!tags.includes(tagToRemove)) {
+    throw new Error("Ce joueur n'est pas suivi.");
+  }
+
+  const updatedTags = tags.filter((t) => t !== tagToRemove);
+  currentMap.PLAYER_TAGS = updatedTags.join(',');
+
+  const payload = Object.entries(currentMap).map(([key, value]) => ({ key, value }));
+  await setRenderEnvVars(payload);
+
   await triggerRenderDeploy();
 }
 
@@ -231,6 +251,7 @@ app.post('/interactions', verifyKeyMiddleware(DISCORD_PUBLIC_KEY), async (req, r
   if (interaction.type === InteractionType.APPLICATION_COMMAND) {
     const { name, options } = interaction.data;
 
+    // ---------- /ajouter-joueur ----------
     if (name === 'ajouter-joueur') {
       const tagOption = options?.find((o) => o.name === 'tag');
       const rawTag = (tagOption?.value || '').trim().replace(/^#/, '').toUpperCase();
@@ -247,6 +268,76 @@ app.post('/interactions', verifyKeyMiddleware(DISCORD_PUBLIC_KEY), async (req, r
         );
       } catch (err) {
         console.error('Erreur ajout joueur :', err.message);
+        await editOriginalInteractionResponse(interaction.token, `❌ Erreur : ${err.message}`);
+      }
+      return;
+    }
+
+    // ---------- /retirer-joueur ----------
+    if (name === 'retirer-joueur') {
+      const tagOption = options?.find((o) => o.name === 'tag');
+      const rawTag = (tagOption?.value || '').trim().replace(/^#/, '').toUpperCase();
+
+      res.send({ type: InteractionResponseType.DEFERRED_CHANNEL_MESSAGE_WITH_SOURCE });
+
+      try {
+        if (!rawTag) throw new Error('Tag vide ou invalide.');
+        await removePlayerTagFromRender(rawTag);
+        await editOriginalInteractionResponse(
+          interaction.token,
+          `✅ Joueur **${rawTag}** retiré du suivi ! Le bot redémarre (~1 min) pour prendre en compte le changement.`
+        );
+      } catch (err) {
+        console.error('Erreur retrait joueur :', err.message);
+        await editOriginalInteractionResponse(interaction.token, `❌ Erreur : ${err.message}`);
+      }
+      return;
+    }
+
+    // ---------- /liste-joueurs ----------
+    if (name === 'liste-joueurs') {
+      res.send({ type: InteractionResponseType.DEFERRED_CHANNEL_MESSAGE_WITH_SOURCE });
+
+      try {
+        const { tags } = await getCurrentPlayerTags();
+
+        if (tags.length === 0) {
+          await editOriginalInteractionResponse(interaction.token, '📋 Aucun joueur suivi actuellement.');
+          return;
+        }
+
+        // Récupère les noms en parallèle, avec repli sur le tag si erreur
+        const names = await Promise.all(
+          tags.map(async (tag) => {
+            const name = await fetchPlayerName(tag);
+            return `• ${name} (#${tag})`;
+          })
+        );
+
+        // Discord limite les messages à 2000 caractères : on découpe si besoin
+        const header = `📋 **${tags.length} joueur(s) suivi(s) :**\n`;
+        let content = header;
+        const chunks = [];
+
+        for (const line of names) {
+          if ((content + line + '\n').length > 1900) {
+            chunks.push(content);
+            content = '';
+          }
+          content += line + '\n';
+        }
+        chunks.push(content);
+
+        await editOriginalInteractionResponse(interaction.token, chunks[0]);
+        for (let i = 1; i < chunks.length; i++) {
+          await fetch(`https://discord.com/api/v10/webhooks/${DISCORD_APPLICATION_ID}/${interaction.token}`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ content: chunks[i] })
+          });
+        }
+      } catch (err) {
+        console.error('Erreur liste joueurs :', err.message);
         await editOriginalInteractionResponse(interaction.token, `❌ Erreur : ${err.message}`);
       }
       return;
