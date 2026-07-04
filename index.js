@@ -11,6 +11,10 @@ const DISCORD_APPLICATION_ID = process.env.DISCORD_APPLICATION_ID;
 const RENDER_API_KEY = process.env.RENDER_API_KEY;
 const RENDER_SERVICE_ID = process.env.RENDER_SERVICE_ID;
 
+// Seuil minimum de trophées (sur un brawler) pour qu'une partie soit notifiée.
+// Modifiable via la variable d'environnement MIN_TROPHIES_THRESHOLD (par défaut 2500).
+const MIN_TROPHIES_THRESHOLD = parseInt(process.env.MIN_TROPHIES_THRESHOLD || '2500', 10);
+
 // PLAYER_TAGS : liste de tags séparés par des virgules dans les variables d'environnement
 const PLAYER_TAGS = (process.env.PLAYER_TAGS || '')
   .split(',')
@@ -60,6 +64,29 @@ function formatPlayerLine(p) {
   const brawler = p.brawler?.name || '?';
   const trophies = typeof p.brawler?.trophies === 'number' ? p.brawler.trophies : '?';
   return `• ${p.name} (${p.tag} | ${brawler} | ${trophies})`;
+}
+
+// Parcourt tous les joueurs d'une partie (teams ou players) et renvoie le
+// nombre de trophées le plus élevé trouvé sur un brawler.
+function getMaxTrophiesInBattle(battle) {
+  let allPlayers = [];
+
+  if (Array.isArray(battle.teams)) {
+    for (const team of battle.teams) {
+      allPlayers.push(...team);
+    }
+  } else if (Array.isArray(battle.players)) {
+    allPlayers = battle.players;
+  }
+
+  let max = 0;
+  for (const p of allPlayers) {
+    const trophies = p?.brawler?.trophies;
+    if (typeof trophies === 'number' && trophies > max) {
+      max = trophies;
+    }
+  }
+  return max;
 }
 
 function buildBattleEmbed(playerName, tag, item) {
@@ -136,7 +163,12 @@ async function checkPlayer(tag) {
   const playerName = await fetchPlayerName(tag);
 
   for (const battle of newBattles) {
-    await sendDiscordEmbed(buildBattleEmbed(playerName, tag, battle));
+    const maxTrophies = getMaxTrophiesInBattle(battle.battle || {});
+
+    // On ne notifie que si au moins un joueur de la partie a le seuil de trophées requis
+    if (maxTrophies >= MIN_TROPHIES_THRESHOLD) {
+      await sendDiscordEmbed(buildBattleEmbed(playerName, tag, battle));
+    }
   }
 
   lastSeenBattleTime.set(tag, mostRecentTime);
@@ -383,5 +415,6 @@ app.get('/check', async (req, res) => {
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`Serveur démarré sur le port ${PORT}`);
+  console.log(`Seuil de trophées minimum pour notifier : ${MIN_TROPHIES_THRESHOLD}`);
   console.log(`Joueurs suivis : ${PLAYER_TAGS.join(', ') || '(aucun)'}`);
 });
