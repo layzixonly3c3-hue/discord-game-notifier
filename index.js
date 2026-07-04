@@ -148,6 +148,14 @@ async function sendDiscordEmbed(embed) {
   }
 }
 
+// Modes de jeu à exclure des notifications (Solo Showdown, Duo Showdown, etc.)
+const EXCLUDED_MODE_KEYWORDS = ['solo', 'duo'];
+
+function isExcludedMode(battle) {
+  const mode = (battle.mode || '').toLowerCase();
+  return EXCLUDED_MODE_KEYWORDS.some((keyword) => mode.includes(keyword));
+}
+
 async function checkPlayer(tag) {
   const log = await fetchBattleLog(tag);
   const items = log.items || [];
@@ -167,10 +175,12 @@ async function checkPlayer(tag) {
   const playerName = await fetchPlayerName(tag);
 
   for (const battle of newBattles) {
-    const maxTrophies = getMaxTrophiesInBattle(battle.battle || {});
+    const b = battle.battle || {};
+    const maxTrophies = getMaxTrophiesInBattle(b);
 
-    // On ne notifie que si au moins un joueur de la partie a le seuil de trophées requis
-    if (maxTrophies >= MIN_TROPHIES_THRESHOLD) {
+    // On ignore les modes Solo/Duo Showdown, et on ne notifie que si le
+    // seuil de trophées requis est atteint
+    if (!isExcludedMode(b) && maxTrophies >= MIN_TROPHIES_THRESHOLD) {
       await sendDiscordEmbed(buildBattleEmbed(playerName, tag, battle));
     }
   }
