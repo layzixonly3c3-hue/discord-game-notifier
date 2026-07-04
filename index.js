@@ -136,7 +136,11 @@ async function sendDiscordEmbed(embed) {
   const res = await fetch(DISCORD_WEBHOOK_URL, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ embeds: [embed] })
+    body: JSON.stringify({
+      content: '@everyone',
+      embeds: [embed],
+      allowed_mentions: { parse: ['everyone'] }
+    })
   });
   if (!res.ok) {
     const text = await res.text();
