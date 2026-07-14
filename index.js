@@ -11,11 +11,8 @@ const DISCORD_APPLICATION_ID = process.env.DISCORD_APPLICATION_ID;
 const RENDER_API_KEY = process.env.RENDER_API_KEY;
 const RENDER_SERVICE_ID = process.env.RENDER_SERVICE_ID;
 
-// Seuil minimum de trophées (sur un brawler) pour qu'une partie soit notifiée.
-// Modifiable via la variable d'environnement MIN_TROPHIES_THRESHOLD (par défaut 2500).
 const MIN_TROPHIES_THRESHOLD = parseInt(process.env.MIN_TROPHIES_THRESHOLD || '2500', 10);
 
-// PLAYER_TAGS : liste de tags séparés par des virgules dans les variables d'environnement
 const PLAYER_TAGS = (process.env.PLAYER_TAGS || '')
   .split(',')
   .map((t) => t.trim().replace(/^#/, '').toUpperCase())
@@ -48,7 +45,6 @@ async function fetchPlayerName(tag) {
   }
 }
 
-// Vérifie que le tag existe vraiment côté Brawl Stars avant de l'ajouter
 async function validateTagExists(tag) {
   await bsFetch(`/players/%23${tag}`);
 }
@@ -66,8 +62,6 @@ function formatPlayerLine(p) {
   return `• ${p.name} (${p.tag} | ${brawler} | ${trophies})`;
 }
 
-// Parcourt tous les joueurs d'une partie (teams ou players) et renvoie le
-// nombre de trophées le plus élevé trouvé sur un brawler.
 function getMaxTrophiesInBattle(battle) {
   let allPlayers = [];
 
@@ -148,8 +142,7 @@ async function sendDiscordEmbed(embed) {
   }
 }
 
-// Modes de jeu à exclure des notifications (Solo Showdown, Duo Showdown, etc.)
-const EXCLUDED_MODE_KEYWORDS = ['solo', 'duo'];
+const EXCLUDED_MODE_KEYWORDS = ['duo'];
 
 function isExcludedMode(battle) {
   const mode = (battle.mode || '').toLowerCase();
@@ -178,8 +171,6 @@ async function checkPlayer(tag) {
     const b = battle.battle || {};
     const maxTrophies = getMaxTrophiesInBattle(b);
 
-    // On ignore les modes Solo/Duo Showdown, et on ne notifie que si le
-    // seuil de trophées requis est atteint
     if (!isExcludedMode(b) && maxTrophies >= MIN_TROPHIES_THRESHOLD) {
       await sendDiscordEmbed(buildBattleEmbed(playerName, tag, battle));
     }
@@ -187,8 +178,6 @@ async function checkPlayer(tag) {
 
   lastSeenBattleTime.set(tag, mostRecentTime);
 }
-
-// ---------- Intégration commandes Discord ----------
 
 async function getRenderEnvVars() {
   const res = await fetch(`https://api.render.com/v1/services/${RENDER_SERVICE_ID}/env-vars`, {
@@ -257,8 +246,6 @@ async function addPlayerTagToRender(newTag) {
   const payload = Object.entries(currentMap).map(([key, value]) => ({ key, value }));
   await setRenderEnvVars(payload);
 
-  // Déclenche explicitement un nouveau déploiement pour que le serveur
-  // recharge bien la nouvelle valeur de PLAYER_TAGS en mémoire.
   await triggerRenderDeploy();
 }
 
@@ -297,7 +284,6 @@ app.post('/interactions', verifyKeyMiddleware(DISCORD_PUBLIC_KEY), async (req, r
   if (interaction.type === InteractionType.APPLICATION_COMMAND) {
     const { name, options } = interaction.data;
 
-    // ---------- /ajouter-joueur ----------
     if (name === 'ajouter-joueur') {
       const tagOption = options?.find((o) => o.name === 'tag');
       const rawTag = (tagOption?.value || '').trim().replace(/^#/, '').toUpperCase();
@@ -319,7 +305,6 @@ app.post('/interactions', verifyKeyMiddleware(DISCORD_PUBLIC_KEY), async (req, r
       return;
     }
 
-    // ---------- /retirer-joueur ----------
     if (name === 'retirer-joueur') {
       const tagOption = options?.find((o) => o.name === 'tag');
       const rawTag = (tagOption?.value || '').trim().replace(/^#/, '').toUpperCase();
@@ -340,7 +325,6 @@ app.post('/interactions', verifyKeyMiddleware(DISCORD_PUBLIC_KEY), async (req, r
       return;
     }
 
-    // ---------- /liste-joueurs ----------
     if (name === 'liste-joueurs') {
       res.send({ type: InteractionResponseType.DEFERRED_CHANNEL_MESSAGE_WITH_SOURCE });
 
@@ -352,7 +336,6 @@ app.post('/interactions', verifyKeyMiddleware(DISCORD_PUBLIC_KEY), async (req, r
           return;
         }
 
-        // Récupère les noms en parallèle, avec repli sur le tag si erreur
         const names = await Promise.all(
           tags.map(async (tag) => {
             const name = await fetchPlayerName(tag);
@@ -360,7 +343,6 @@ app.post('/interactions', verifyKeyMiddleware(DISCORD_PUBLIC_KEY), async (req, r
           })
         );
 
-        // Discord limite les messages à 2000 caractères : on découpe si besoin
         const header = `📋 **${tags.length} joueur(s) suivi(s) :**\n`;
         let content = header;
         const chunks = [];
